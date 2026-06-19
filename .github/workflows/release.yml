@@ -1,0 +1,247 @@
+name: Build & Release
+
+# Se dispara de dos formas:
+# 1. Manual desde la UI (workflow_dispatch) — útil para rebuilds o testing
+# 2. Vía repository_dispatch — disparado por el repo privado al taggear
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Tag/branch/commit del repo privado a buildear (ej: v1.0.13 o main)'
+        required: true
+        default: 'main'
+      version:
+        description: 'Versión del release a publicar (ej: 1.0.13). Si vacío, usa el ref.'
+        required: false
+  repository_dispatch:
+    types: [build-release]
+
+permissions:
+  contents: write
+
+env:
+  PRIVATE_REPO: agambobe/sendwa
+  BUILD_REF:    ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+  VERSION:      ${{ github.event.inputs.version || github.event.client_payload.version || '' }}
+
+jobs:
+
+  # ════════════════════════════════════════════════════════════
+  #  Resolver versión a partir del input o del ref
+  # ════════════════════════════════════════════════════════════
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      ref:     ${{ steps.v.outputs.ref }}
+    steps:
+      - name: Resolver versión
+        id: v
+        run: |
+          REF="${{ env.BUILD_REF }}"
+          VER="${{ env.VERSION }}"
+          if [ -z "$VER" ]; then
+            # Si el ref es vX.Y.Z, extraer la versión
+            VER="${REF#v}"
+            if ! echo "$VER" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::warning::No se pudo deducir versión del ref '$REF'. Usando '0.0.0-${REF}'."
+              VER="0.0.0-${REF}"
+            fi
+          fi
+          echo "version=$VER" >> $GITHUB_OUTPUT
+          echo "ref=$REF" >> $GITHUB_OUTPUT
+          echo "Building ref='$REF' as version='$VER'"
+
+  # ════════════════════════════════════════════════════════════
+  #  BUILD WINDOWS  →  SendWA-Setup.exe
+  # ════════════════════════════════════════════════════════════
+  build-windows:
+    needs: setup
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout código privado
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          ref: ${{ needs.setup.outputs.ref }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Instalar dependencias Python
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pystray Pillow pyinstaller pywin32
+
+      - name: Descargar Node.js portátil (Windows x64)
+        shell: pwsh
+        run: |
+          $ver = "20.19.2"
+          $url = "https://nodejs.org/dist/v$ver/node-v$ver-win-x64.zip"
+          New-Item -ItemType Directory -Force build\node-win | Out-Null
+          Invoke-WebRequest $url -OutFile build\node-win.zip -UseBasicParsing
+          Expand-Archive build\node-win.zip -DestinationPath build\node-win-tmp -Force
+          $inner = (Get-ChildItem build\node-win-tmp -Directory)[0].FullName
+          Copy-Item "$inner\*" build\node-win\ -Recurse -Force
+          Remove-Item build\node-win-tmp -Recurse -Force
+          Remove-Item build\node-win.zip -Force
+
+      - name: Compilar con PyInstaller
+        shell: pwsh
+        run: python -m PyInstaller build\sendwa.spec --noconfirm --clean
+
+      - name: Copiar whatsapp-service al dist (solo JS, sin node_modules)
+        shell: pwsh
+        run: |
+          $dest = "dist\SendWA\whatsapp-service"
+          New-Item -ItemType Directory -Force $dest | Out-Null
+          robocopy whatsapp-service $dest /E /XD node_modules /NFL /NDL /NJH /NJS
+          $rc = $LASTEXITCODE
+          if ($rc -gt 7) { throw "robocopy fallo: $rc" }
+          foreach ($d in @("data","media","logs")) {
+            New-Item -ItemType Directory -Force "dist\SendWA\$d" | Out-Null
+          }
+          $global:LASTEXITCODE = 0
+
+      - name: Generar instalador con Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = @(
+            "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+            "C:\Program Files\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "Inno Setup no encontrado" }
+          $version = "${{ needs.setup.outputs.version }}"
+          & $iscc "/DAppVersion=$version" build\installer_windows.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC fallo: $LASTEXITCODE" }
+          $size = [math]::Round((Get-Item dist\SendWA-Setup.exe).Length / 1MB, 1)
+          Write-Host "Instalador generado: $size MB"
+
+      - name: Subir instalador como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: dist\SendWA-Setup.exe
+          retention-days: 1
+
+  # ════════════════════════════════════════════════════════════
+  #  BUILD macOS  →  SendWA-macos.zip
+  # ════════════════════════════════════════════════════════════
+  build-macos:
+    needs: setup
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout código privado
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PRIVATE_REPO }}
+          ref: ${{ needs.setup.outputs.ref }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+
+      - name: Armar bundle SendWA-macos
+        run: |
+          BUNDLE="dist/SendWA-macos"
+          mkdir -p "$BUNDLE/_resources"
+
+          # Los scripts .command pueden tener nombres viejos o nuevos según el ref
+          for cmd in "Instalar-SendWA.command" "Iniciar-SendWA.command" "Desinstalar-SendWA.command" \
+                     "Install SendWA.command" "Start SendWA.command" "Uninstall SendWA.command"; do
+            if [ -f "build/macos/$cmd" ]; then
+              cp "build/macos/$cmd" "$BUNDLE/"
+            fi
+          done
+          cp "build/macos/README.md" "$BUNDLE/"
+
+          cp -R app                  "$BUNDLE/_resources/"
+          rsync -a --exclude='node_modules/' --exclude='.git/' \
+            whatsapp-service/        "$BUNDLE/_resources/whatsapp-service/"
+          cp version.py              "$BUNDLE/_resources/"
+          cp app.cfg                 "$BUNDLE/_resources/"
+          cp launcher_mac.py         "$BUNDLE/_resources/"
+          cp launcher_settings.py    "$BUNDLE/_resources/"
+          cp requirements.txt        "$BUNDLE/_resources/"
+          cp .env.example            "$BUNDLE/_resources/"
+          cp build/macos/com.sendwa.app.plist "$BUNDLE/_resources/"
+
+          chmod +x "$BUNDLE/"*.command
+
+          find "$BUNDLE/_resources" -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
+          find "$BUNDLE/_resources" -type f -name '*.pyc' -delete 2>/dev/null || true
+
+          echo "Contenido del bundle:"
+          ls -la "$BUNDLE/"
+
+      - name: Crear ZIP
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent SendWA-macos SendWA-macos.zip
+          du -sh SendWA-macos.zip
+
+      - name: Subir ZIP como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-bundle
+          path: dist/SendWA-macos.zip
+          retention-days: 1
+
+  # ════════════════════════════════════════════════════════════
+  #  RELEASE  →  publica en ESTE repo (público)
+  # ════════════════════════════════════════════════════════════
+  release:
+    needs: [setup, build-windows, build-macos]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar artefactos
+        uses: actions/download-artifact@v4
+        with:
+          path: release-files/
+          merge-multiple: true
+
+      - name: Verificar archivos
+        run: |
+          ls -lh release-files/
+          [ -f release-files/SendWA-Setup.exe ] || { echo "Falta SendWA-Setup.exe"; exit 1; }
+          [ -f release-files/SendWA-macos.zip ] || { echo "Falta SendWA-macos.zip"; exit 1; }
+
+      - name: Publicar GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ needs.setup.outputs.version }}"
+          name: "SendWA v${{ needs.setup.outputs.version }}"
+          body: |
+            ## SendWA v${{ needs.setup.outputs.version }}
+
+            ### Instalación
+
+            #### Windows
+            1. Descarga `SendWA-Setup.exe`
+            2. Ejecuta — Siguiente → Siguiente → Finalizar
+            3. Si Windows SmartScreen lo bloquea: clic en **"Más información"** → **"Ejecutar de todas formas"**
+
+            #### macOS
+            1. Descarga `SendWA-macos.zip`
+            2. Doble clic para descomprimir (Safari/Finder lo hace automáticamente)
+            3. Abre la carpeta `SendWA-macos`
+            4. Doble clic en `Instalar-SendWA.command`
+            5. Si macOS lo bloquea, sigue las instrucciones de la página de bienvenida
+
+            ### Requisito
+            Tener **Google Chrome** o **Microsoft Edge** instalado (en macOS el instalador lo descarga si falta).
+
+            ### Soporte
+            - WhatsApp: [+57 317 115 7536](https://wa.me/573171157536)
+            - Email: sales@velyne.com
+          files: |
+            release-files/SendWA-Setup.exe
+            release-files/SendWA-macos.zip
+          draft: false
+          prerelease: false
