@@ -134,7 +134,7 @@ jobs:
   # ════════════════════════════════════════════════════════════
   #  BUILD macOS  →  SendWA.app autocontenido (PyInstaller)
   #  Igual que Windows: Python + Node embebidos, sin brew/pip/npm.
-  #  Matrix por arquitectura → 2 zips (Apple Silicon + Intel).
+  #  Build por arquitectura → DMG (Apple Silicon).
   # ════════════════════════════════════════════════════════════
   build-macos:
     needs: setup
@@ -210,23 +210,24 @@ jobs:
           codesign --deep --force -s - dist/SendWA.app
           codesign --verify --deep --strict dist/SendWA.app && echo "firma OK"
 
-      - name: Crear ZIP SendWA-macos-${{ matrix.arch }}.zip
+      - name: Crear DMG SendWA-macos-${{ matrix.arch }}.dmg
         run: |
-          STAGE="dist/SendWA-macos-${{ matrix.arch }}"
+          STAGE="dist/dmg-${{ matrix.arch }}"
           mkdir -p "$STAGE"
           cp -R dist/SendWA.app "$STAGE/"
-          cp build/macos/README.md "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          cp build/macos/README.md "$STAGE/Léeme.md"
           cp build/macos/Desinstalar-SendWA.command "$STAGE/"
           chmod +x "$STAGE/Desinstalar-SendWA.command"
-          cd dist
-          ditto -c -k --sequesterRsrc --keepParent "SendWA-macos-${{ matrix.arch }}" "SendWA-macos-${{ matrix.arch }}.zip"
-          du -sh "SendWA-macos-${{ matrix.arch }}.zip"
+          DMG="dist/SendWA-macos-${{ matrix.arch }}.dmg"
+          hdiutil create -volname "SendWA" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+          du -sh "$DMG"
 
-      - name: Subir ZIP como artefacto
+      - name: Subir DMG como artefacto
         uses: actions/upload-artifact@v4
         with:
           name: macos-${{ matrix.arch }}
-          path: dist/SendWA-macos-${{ matrix.arch }}.zip
+          path: dist/SendWA-macos-${{ matrix.arch }}.dmg
           retention-days: 1
 
   # ════════════════════════════════════════════════════════════
@@ -235,7 +236,7 @@ jobs:
   release:
     needs: [setup, build-windows, build-macos]
     # Windows es obligatorio. macOS NO bloquea: si su build (o una de las dos
-    # arquitecturas) falla, igual publicamos Windows + el/los zip(s) mac que sí
+    # arquitecturas) falla, igual publicamos Windows + el/los DMG mac que sí
     # salieron. 'always()' hace que release corra aunque build-macos falle;
     # el guard exige que Windows haya sido exitoso.
     if: ${{ always() && needs.build-windows.result == 'success' }}
@@ -251,10 +252,10 @@ jobs:
       - name: Verificar archivos
         run: |
           ls -lh release-files/ || true
-          # Solo Windows es obligatorio. El zip mac se adjunta si existe.
+          # Solo Windows es obligatorio. El DMG mac se adjunta si existe.
           [ -f release-files/SendWA-Setup.exe ] || { echo "::error::Falta SendWA-Setup.exe (build Windows)"; exit 1; }
-          [ -f release-files/SendWA-macos-arm64.zip ] && echo "ok: SendWA-macos-arm64.zip" \
-            || echo "::warning::macOS arm64 no presente — se publica sin él"
+          [ -f release-files/SendWA-macos-arm64.dmg ] && echo "ok: SendWA-macos-arm64.dmg" \
+            || echo "::warning::macOS arm64 no presente — se publica sin el"
 
       - name: Publicar GitHub Release
         uses: softprops/action-gh-release@v2
@@ -272,12 +273,12 @@ jobs:
             3. Si Windows SmartScreen lo bloquea: clic en **"Más información"** → **"Ejecutar de todas formas"**
 
             #### macOS (Apple Silicon — M1/M2/M3/M4)
-            1. Descarga `SendWA-macos-arm64.zip` y descomprimilo
-            2. Arrastrá **SendWA.app** a **Aplicaciones**
+            1. Descarga `SendWA-macos-arm64.dmg` y ábrelo
+            2. Arrastra **SendWA.app** a **Aplicaciones**
             3. **Primera vez:** clic derecho sobre SendWA.app → **Abrir** → **Abrir**
-               (si no te deja: Terminal → `xattr -cr /Applications/SendWA.app`)
+               (si no abre: Terminal → `xattr -cr /Applications/SendWA.app`)
 
-            No necesitás instalar Python ni Node.js — vienen incluidos.
+            No necesitas instalar Python ni Node.js — vienen incluidos.
 
             ### Requisito
             Tener **Google Chrome** o **Microsoft Edge** instalado.
@@ -287,8 +288,8 @@ jobs:
             - Email: sales@velyne.com
           files: |
             release-files/SendWA-Setup.exe
-            release-files/SendWA-macos-arm64.zip
-          # No fallar si falta el zip mac (build mac desacoplado de Windows)
+            release-files/SendWA-macos-arm64.dmg
+          # No fallar si falta el DMG mac (build mac desacoplado de Windows)
           fail_on_unmatched_files: false
           draft: false
           prerelease: false
