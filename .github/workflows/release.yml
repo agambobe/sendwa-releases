@@ -132,11 +132,26 @@ jobs:
           retention-days: 1
 
   # ════════════════════════════════════════════════════════════
-  #  BUILD macOS  →  SendWA-macos.zip
+  #  BUILD macOS  →  SendWA.app autocontenido (PyInstaller)
+  #  Igual que Windows: Python + Node embebidos, sin brew/pip/npm.
+  #  Matrix por arquitectura → 2 zips (Apple Silicon + Intel).
   # ════════════════════════════════════════════════════════════
   build-macos:
     needs: setup
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-14        # Apple Silicon
+            node_arch: darwin-arm64
+          - arch: intel
+            runner: macos-13        # Intel x86_64
+            node_arch: darwin-x64
+    runs-on: ${{ matrix.runner }}
+
+    env:
+      NODE_VER: '20.19.2'
 
     steps:
       - name: Checkout código privado
@@ -146,50 +161,70 @@ jobs:
           ref: ${{ needs.setup.outputs.ref }}
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
 
-      - name: Armar bundle SendWA-macos
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Instalar dependencias Python
         run: |
-          BUNDLE="dist/SendWA-macos"
-          mkdir -p "$BUNDLE/_resources"
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller pystray Pillow pyobjc-core pyobjc-framework-Cocoa
 
-          # Los scripts .command pueden tener nombres viejos o nuevos según el ref
-          for cmd in "Instalar-SendWA.command" "Iniciar-SendWA.command" "Desinstalar-SendWA.command" \
-                     "Install SendWA.command" "Start SendWA.command" "Uninstall SendWA.command"; do
-            if [ -f "build/macos/$cmd" ]; then
-              cp "build/macos/$cmd" "$BUNDLE/"
-            fi
-          done
-          cp "build/macos/README.md" "$BUNDLE/"
+      - name: Generar íconos (.icns / .ico)
+        run: python build/generate_icons.py
 
-          cp -R app                  "$BUNDLE/_resources/"
-          rsync -a --exclude='node_modules/' --exclude='.git/' \
-            whatsapp-service/        "$BUNDLE/_resources/whatsapp-service/"
-          cp version.py              "$BUNDLE/_resources/"
-          cp app.cfg                 "$BUNDLE/_resources/"
-          cp launcher_mac.py         "$BUNDLE/_resources/"
-          cp launcher_settings.py    "$BUNDLE/_resources/"
-          cp requirements.txt        "$BUNDLE/_resources/"
-          cp .env.example            "$BUNDLE/_resources/"
-          cp build/macos/com.sendwa.app.plist "$BUNDLE/_resources/"
-
-          chmod +x "$BUNDLE/"*.command
-
-          find "$BUNDLE/_resources" -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
-          find "$BUNDLE/_resources" -type f -name '*.pyc' -delete 2>/dev/null || true
-
-          echo "Contenido del bundle:"
-          ls -la "$BUNDLE/"
-
-      - name: Crear ZIP
+      - name: Descargar Node.js portátil (${{ matrix.node_arch }})
         run: |
+          curl -fsSL "https://nodejs.org/dist/v${NODE_VER}/node-v${NODE_VER}-${{ matrix.node_arch }}.tar.gz" -o /tmp/node.tar.gz
+          mkdir -p build/node-mac
+          tar -xzf /tmp/node.tar.gz -C /tmp
+          cp -R /tmp/node-v${NODE_VER}-${{ matrix.node_arch }}/* build/node-mac/
+          build/node-mac/bin/node --version
+
+      - name: Pre-instalar node_modules del whatsapp-service
+        run: |
+          export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+          export PUPPETEER_SKIP_DOWNLOAD=true
+          NODE="$PWD/build/node-mac/bin/node"
+          NPM="$PWD/build/node-mac/lib/node_modules/npm/bin/npm-cli.js"
+          cd whatsapp-service
+          "$NODE" "$NPM" install --omit=dev --no-audit --no-fund
+          du -sh node_modules
+
+      - name: Compilar SendWA.app con PyInstaller
+        run: python -m PyInstaller build/sendwa.spec --noconfirm --clean
+
+      - name: Empaquetar whatsapp-service (con node_modules) dentro del .app
+        run: |
+          RES="dist/SendWA.app/Contents/Resources"
+          rsync -a --exclude='.git/' whatsapp-service/ "$RES/whatsapp-service/"
+          find "$RES/app" -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
+          ls -la "$RES"
+
+      - name: Firmar (ad-hoc) el .app
+        run: |
+          codesign --deep --force -s - dist/SendWA.app
+          codesign --verify --deep --strict dist/SendWA.app && echo "firma OK"
+
+      - name: Crear ZIP SendWA-macos-${{ matrix.arch }}.zip
+        run: |
+          STAGE="dist/SendWA-macos-${{ matrix.arch }}"
+          mkdir -p "$STAGE"
+          cp -R dist/SendWA.app "$STAGE/"
+          cp build/macos/README.md "$STAGE/"
+          cp build/macos/Desinstalar-SendWA.command "$STAGE/"
+          chmod +x "$STAGE/Desinstalar-SendWA.command"
           cd dist
-          ditto -c -k --sequesterRsrc --keepParent SendWA-macos SendWA-macos.zip
-          du -sh SendWA-macos.zip
+          ditto -c -k --sequesterRsrc --keepParent "SendWA-macos-${{ matrix.arch }}" "SendWA-macos-${{ matrix.arch }}.zip"
+          du -sh "SendWA-macos-${{ matrix.arch }}.zip"
 
       - name: Subir ZIP como artefacto
         uses: actions/upload-artifact@v4
         with:
-          name: macos-bundle
-          path: dist/SendWA-macos.zip
+          name: macos-${{ matrix.arch }}
+          path: dist/SendWA-macos-${{ matrix.arch }}.zip
           retention-days: 1
 
   # ════════════════════════════════════════════════════════════
@@ -197,6 +232,11 @@ jobs:
   # ════════════════════════════════════════════════════════════
   release:
     needs: [setup, build-windows, build-macos]
+    # Windows es obligatorio. macOS NO bloquea: si su build (o una de las dos
+    # arquitecturas) falla, igual publicamos Windows + el/los zip(s) mac que sí
+    # salieron. 'always()' hace que release corra aunque build-macos falle;
+    # el guard exige que Windows haya sido exitoso.
+    if: ${{ always() && needs.build-windows.result == 'success' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -208,9 +248,12 @@ jobs:
 
       - name: Verificar archivos
         run: |
-          ls -lh release-files/
-          [ -f release-files/SendWA-Setup.exe ] || { echo "Falta SendWA-Setup.exe"; exit 1; }
-          [ -f release-files/SendWA-macos.zip ] || { echo "Falta SendWA-macos.zip"; exit 1; }
+          ls -lh release-files/ || true
+          # Solo Windows es obligatorio. Los zip mac se adjuntan si existen.
+          [ -f release-files/SendWA-Setup.exe ] || { echo "::error::Falta SendWA-Setup.exe (build Windows)"; exit 1; }
+          for f in SendWA-macos-arm64.zip SendWA-macos-intel.zip; do
+            [ -f "release-files/$f" ] && echo "ok: $f" || echo "::warning::macOS $f no presente — se publica sin él"
+          done
 
       - name: Publicar GitHub Release
         uses: softprops/action-gh-release@v2
@@ -228,20 +271,28 @@ jobs:
             3. Si Windows SmartScreen lo bloquea: clic en **"Más información"** → **"Ejecutar de todas formas"**
 
             #### macOS
-            1. Descarga `SendWA-macos.zip`
-            2. Doble clic para descomprimir (Safari/Finder lo hace automáticamente)
-            3. Abre la carpeta `SendWA-macos`
-            4. Doble clic en `Instalar-SendWA.command`
-            5. Si macOS lo bloquea, sigue las instrucciones de la página de bienvenida
+            Elegí según tu Mac (menú  → Acerca de esta Mac):
+            - **Apple Silicon** (M1/M2/M3/M4): `SendWA-macos-arm64.zip`
+            - **Intel**: `SendWA-macos-intel.zip`
+
+            1. Descarga el `.zip` y descomprimilo
+            2. Arrastrá **SendWA.app** a **Aplicaciones**
+            3. **Primera vez:** clic derecho sobre SendWA.app → **Abrir** → **Abrir**
+               (si no te deja: Terminal → `xattr -cr /Applications/SendWA.app`)
+
+            No necesitás instalar Python ni Node.js — vienen incluidos.
 
             ### Requisito
-            Tener **Google Chrome** o **Microsoft Edge** instalado (en macOS el instalador lo descarga si falta).
+            Tener **Google Chrome** o **Microsoft Edge** instalado.
 
             ### Soporte
             - WhatsApp: [+57 317 115 7536](https://wa.me/573171157536)
             - Email: sales@velyne.com
           files: |
             release-files/SendWA-Setup.exe
-            release-files/SendWA-macos.zip
+            release-files/SendWA-macos-arm64.zip
+            release-files/SendWA-macos-intel.zip
+          # No fallar si falta algún zip mac (build mac desacoplado de Windows)
+          fail_on_unmatched_files: false
           draft: false
           prerelease: false
