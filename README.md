@@ -11,7 +11,15 @@ El código fuente vive en un repositorio privado.
 | Sistema | Archivo |
 |---|---|
 | 🪟 Windows 10/11 | `SendWA-Setup.exe` |
-| 🍎 macOS (Apple Silicon e Intel) | `SendWA-macos.zip` |
+| 🍎 macOS (Apple Silicon — M1/M2/M3/M4) | `SendWA-macos-arm64.dmg` |
+
+### Instalación
+
+**Windows:** ejecuta `SendWA-Setup.exe` → Siguiente → Finalizar. Si SmartScreen lo bloquea: "Más información" → "Ejecutar de todas formas".
+
+**macOS:** abre `SendWA-macos-arm64.dmg` y arrastra **SendWA.app** a **Aplicaciones**. La primera vez, haz **clic derecho sobre SendWA.app → Abrir** (solo la primera vez). Si no abre, en Terminal: `xattr -cr /Applications/SendWA.app`.
+
+> No necesitas instalar Python ni Node.js — vienen incluidos. Requiere tener **Google Chrome** o **Microsoft Edge** instalado.
 
 ## ¿Qué es SendWA?
 
