@@ -172,7 +172,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-          python -m pip install pyinstaller pystray Pillow pyobjc-core pyobjc-framework-Cocoa
+          python -m pip install pyinstaller pystray Pillow pyobjc-core pyobjc-framework-Cocoa rumps
 
       - name: Generar íconos (.icns / .ico)
         run: python build/generate_icons.py
