@@ -145,9 +145,11 @@ jobs:
           - arch: arm64
             runner: macos-14        # Apple Silicon
             node_arch: darwin-arm64
-          - arch: intel
-            runner: macos-13        # Intel x86_64
-            node_arch: darwin-x64
+          # Intel (macos-13) retirado: los runners x86_64 quedan colgados en
+          # cola y bloquean el release. Para re-habilitarlo, agregar:
+          #   - arch: intel
+          #     runner: macos-13
+          #     node_arch: darwin-x64
     runs-on: ${{ matrix.runner }}
 
     env:
@@ -249,11 +251,10 @@ jobs:
       - name: Verificar archivos
         run: |
           ls -lh release-files/ || true
-          # Solo Windows es obligatorio. Los zip mac se adjuntan si existen.
+          # Solo Windows es obligatorio. El zip mac se adjunta si existe.
           [ -f release-files/SendWA-Setup.exe ] || { echo "::error::Falta SendWA-Setup.exe (build Windows)"; exit 1; }
-          for f in SendWA-macos-arm64.zip SendWA-macos-intel.zip; do
-            [ -f "release-files/$f" ] && echo "ok: $f" || echo "::warning::macOS $f no presente — se publica sin él"
-          done
+          [ -f release-files/SendWA-macos-arm64.zip ] && echo "ok: SendWA-macos-arm64.zip" \
+            || echo "::warning::macOS arm64 no presente — se publica sin él"
 
       - name: Publicar GitHub Release
         uses: softprops/action-gh-release@v2
@@ -270,12 +271,8 @@ jobs:
             2. Ejecuta — Siguiente → Siguiente → Finalizar
             3. Si Windows SmartScreen lo bloquea: clic en **"Más información"** → **"Ejecutar de todas formas"**
 
-            #### macOS
-            Elegí según tu Mac (menú  → Acerca de esta Mac):
-            - **Apple Silicon** (M1/M2/M3/M4): `SendWA-macos-arm64.zip`
-            - **Intel**: `SendWA-macos-intel.zip`
-
-            1. Descarga el `.zip` y descomprimilo
+            #### macOS (Apple Silicon — M1/M2/M3/M4)
+            1. Descarga `SendWA-macos-arm64.zip` y descomprimilo
             2. Arrastrá **SendWA.app** a **Aplicaciones**
             3. **Primera vez:** clic derecho sobre SendWA.app → **Abrir** → **Abrir**
                (si no te deja: Terminal → `xattr -cr /Applications/SendWA.app`)
@@ -291,8 +288,7 @@ jobs:
           files: |
             release-files/SendWA-Setup.exe
             release-files/SendWA-macos-arm64.zip
-            release-files/SendWA-macos-intel.zip
-          # No fallar si falta algún zip mac (build mac desacoplado de Windows)
+          # No fallar si falta el zip mac (build mac desacoplado de Windows)
           fail_on_unmatched_files: false
           draft: false
           prerelease: false
